@@ -18,6 +18,7 @@ import {
   StdioConnection,
   SSEConnection,
 } from "@langchain/mcp-adapters";
+import { StructuredToolInterface } from "@langchain/core/tools";
 import { RunnableConfig } from "@langchain/core/runnables";
 import { AgentConfiguration } from "@/types/agent";
 import { retrieveRelevantDocuments } from "@/lib/retrieval";
@@ -306,19 +307,17 @@ async function initializeMCPClient(enabledServers: string[]) {
 
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant that can use tools to find information`;
 
-// Initialize base tools and model
-const baseTools = await initializeMCPClient([
-  "tavily",
-  "wolfram-alpha",
-  "notion",
-]);
-const toolNode = new ToolNode(baseTools);
+// Cache for tools based on enabled MCP server configuration
+const toolCache = new Map<string, StructuredToolInterface[]>();
 
-// Create a model and give it access to the tools
-const model = new ChatOpenAI({
+// Initialize an empty tool node; tools will be populated per run
+const toolNode = new ToolNode([]);
+
+// Base model instance; tools will be bound dynamically
+const baseModel = new ChatOpenAI({
   model: "gpt-4.1",
   temperature: 0.5,
-}).bindTools(baseTools);
+});
 
 // Define the function that determines whether to continue or not
 function shouldContinue({ messages }: typeof MessagesAnnotation.State) {
@@ -381,7 +380,18 @@ async function callModel(
   // Combine system prompt with memory context
   const enhancedSystemPrompt = `${systemPrompt}${memoryContext}`;
 
-  const response = await model.invoke([
+  const enabledServers = agentConfig.enabled_mcp_servers || [];
+  const cacheKey = enabledServers.slice().sort().join(",");
+  let tools = toolCache.get(cacheKey);
+  if (!tools) {
+    tools = await initializeMCPClient(enabledServers);
+    toolCache.set(cacheKey, tools);
+  }
+
+  toolNode.tools = tools;
+  const modelWithTools = baseModel.bindTools(tools);
+
+  const response = await modelWithTools.invoke([
     new SystemMessage(enhancedSystemPrompt),
     ...state.messages,
   ]);
