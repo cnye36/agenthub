@@ -122,6 +122,7 @@ async function writeMemory(state: AgentState, config: LangGraphRunnableConfig) {
           });
           console.log(`Stored new memory: ${key} = ${JSON.stringify(value)}`);
         }
+
       }
 
       return { messages: updatedMessages, has_memory_updates: true };
@@ -417,3 +418,4 @@ const workflow = new StateGraph(MessagesAnnotation)
 
 // Export the compiled graph for platform deployment
 export const graph = workflow.compile();
+
