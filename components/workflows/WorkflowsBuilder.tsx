@@ -254,7 +254,7 @@ function WorkflowBuilder({ initialWorkflowId }: WorkflowsBuilderProps) {
           .from("workflows")
           .insert({
             name: workflowName,
-            user_id: user.id,
+            owner_id: user.id,
             nodes: [],
             edges: [],
             status: "draft",
@@ -297,7 +297,7 @@ function WorkflowBuilder({ initialWorkflowId }: WorkflowsBuilderProps) {
       const idToLoad = workflowId || initialWorkflowId;
       setLoading(true);
       try {
-        const [workflowResult, triggersResult] = await Promise.all([
+        const [workflowResult, triggersResult, tasksResult] = await Promise.all([
           supabase
             .from("workflows")
             .select("*")
@@ -307,13 +307,20 @@ function WorkflowBuilder({ initialWorkflowId }: WorkflowsBuilderProps) {
             .from("workflow_triggers")
             .select("*")
             .eq("workflow_id", idToLoad),
+          supabase
+            .from("workflow_tasks")
+            .select("*")
+            .eq("workflow_id", idToLoad)
+            .order("position"),
         ]);
 
         if (workflowResult.error) throw workflowResult.error;
         if (triggersResult.error) throw triggersResult.error;
+        if (tasksResult.error) throw tasksResult.error;
 
         const workflow = workflowResult.data;
         const triggers = triggersResult.data as WorkflowTrigger[];
+        const workflowTasks = tasksResult.data || [];
 
         if (workflow) {
           setWorkflowId(workflow.workflow_id);
@@ -338,25 +345,25 @@ function WorkflowBuilder({ initialWorkflowId }: WorkflowsBuilderProps) {
                 onOpenTaskSidebar: () => setIsTaskSidebarOpen(true),
               } as TriggerNodeData,
             })),
-            ...((workflow.nodes || []) as StoredWorkflowNode[]).map(
-              (node: StoredWorkflowNode) => ({
-                ...node,
-                type: "task" as const,
-                data: {
-                  workflow_task_id: node.data.workflow_task_id,
-                  workflow_id: workflow.workflow_id,
-                  name: node.data.name,
-                  description: node.data.description,
-                  task_type: node.data.task_type,
-                  config: node.data.config,
-                  onAssignAgent: handleAssignAgent,
-                  onConfigureTask: handleConfigureTask,
-                  isConfigOpen: false,
-                  user_id: "",
-                  status: "idle",
-                } as unknown as TaskNodeData,
-              })
-            ),
+            ...workflowTasks.map((task: any) => ({
+              id: `task-${task.workflow_task_id}`,
+              type: "task" as const,
+              position: { x: 300, y: 100 }, // Default position, you might want to store this in the database
+              data: {
+                workflow_task_id: task.workflow_task_id,
+                workflow_id: workflow.workflow_id,
+                name: task.name,
+                description: task.description,
+                task_type: task.task_type,
+                config: task.config,
+                assignedAgent: task.config?.assigned_agent,
+                status: task.status || "idle",
+                onAssignAgent: handleAssignAgent,
+                onConfigureTask: handleConfigureTask,
+                isConfigOpen: false,
+                user_id: "",
+              } as unknown as TaskNodeData,
+            })),
           ];
 
           setNodes(allNodes);
@@ -598,7 +605,7 @@ function WorkflowBuilder({ initialWorkflowId }: WorkflowsBuilderProps) {
             description: newTask.description || "",
             task_type: newTask.task_type,
             workflow_id: workflowId,
-            assigned_agent: newTask.config?.assigned_agent || {
+            assignedAgent: newTask.config?.assigned_agent || {
               id: agent.id,
               name: agent.name,
               avatar: agent.agent_avatar,
@@ -739,7 +746,7 @@ function WorkflowBuilder({ initialWorkflowId }: WorkflowsBuilderProps) {
               ...node,
               data: {
                 ...node.data,
-                assigned_agent: {
+                assignedAgent: {
                   id: agent.id,
                   name: agent.name,
                   avatar: agent.agent_avatar,

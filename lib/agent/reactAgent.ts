@@ -10,27 +10,21 @@ import {
   StateGraph,
   MessagesAnnotation,
   InMemoryStore,
-  LangGraphRunnableConfig,
 } from "@langchain/langgraph";
-import {
-  MultiServerMCPClient,
-  Connection,
-  StdioConnection,
-  SSEConnection,
-} from "@langchain/mcp-adapters";
+import { Connection, MultiServerMCPClient, type ClientConfig } from "@langchain/mcp-adapters";
 import { StructuredToolInterface } from "@langchain/core/tools";
 import { RunnableConfig } from "@langchain/core/runnables";
 import { AgentConfiguration } from "@/types/agent";
 import { retrieveRelevantDocuments } from "@/lib/retrieval";
-import fs from "fs";
 import { createClient } from "@/supabase/client";
 import { v4 as uuidv4 } from "uuid";
+import { getMCPToken } from "@/lib/agent/oauth";
 
 // Initialize the memory store
 export const store = new InMemoryStore();
 
 // Function to extract and write user memories
-async function writeMemory(state: AgentState, config: LangGraphRunnableConfig) {
+async function writeMemory(state: AgentState, config: RunnableConfig) {
   const configurable =
     (config.configurable as {
       agentId?: string;
@@ -123,7 +117,6 @@ async function writeMemory(state: AgentState, config: LangGraphRunnableConfig) {
           });
           console.log(`Stored new memory: ${key} = ${JSON.stringify(value)}`);
         }
-
       }
 
       return { messages: updatedMessages, has_memory_updates: true };
@@ -223,87 +216,133 @@ export async function retrieveKb(state: AgentState, config: RunnableConfig) {
 
 // Function to get enabled MCP servers configuration
 interface MCPServerConfig {
-  transport?: "stdio" | "sse";
+  transport: "stdio" | "http"; // Simplified to "http" for both sse and streamable http
   command?: string;
   args?: string[];
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
-  useNodeEventSource?: boolean;
+  authProvider?: string;
+  automaticSSEFallback?: boolean;
 }
 
-// Get the enabled MCP servers configuration
-function getEnabledMCPServers(enabledServers: string[]) {
-  const allServers = JSON.parse(
-    fs.readFileSync("./lib/agent/mcp.json", "utf-8")
-  ).servers as Record<string, MCPServerConfig>;
+// Define MCP servers inline configuration
+const MCP_SERVERS_CONFIG: Record<string, any> = {
+  "gmail-mcp-server": {
+    transport: "http",
+    url: "http://146.190.159.62:8080/mcp",
+    headers: {
+      "x-google-access-token": "OAUTH:google",
+    },
+    authProvider: "google",
+    automaticSSEFallback: true,
+  },
+  firecrawl: {
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "firecrawl-mcp"],
+    env: {
+      FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY || "",
+    },
+  },
+  math: {
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-math"],
+  },
+};
 
-  const enabledServerConfig: Record<string, Connection> = {};
-  enabledServers.forEach((serverName) => {
-    if (allServers[serverName]) {
-      const serverConfig = allServers[serverName];
+/**
+ * Creates the full client configuration object for the MultiServerMCPClient.
+ * Renamed from getEnabledMCPServers for clarity.
+ */
+async function getMcpClientConfig(
+  enabledServers: string[],
+  userId?: string
+): Promise<ClientConfig> {
+  const mcpServers: Record<string, Connection> = {};
 
-      // Apply environment variables for API keys
-      if (serverConfig.env) {
-        // Replace env values with process.env values where they exist
-        Object.keys(serverConfig.env).forEach((key) => {
-          if (process.env[key]) {
-            serverConfig.env![key] = process.env[key]!;
-          }
-        });
-      }
-
-      // Process headers to replace environment variable placeholders
-      if (serverConfig.headers) {
-        Object.keys(serverConfig.headers).forEach((key) => {
-          const headerValue = serverConfig.headers![key];
-          if (typeof headerValue === "string" && headerValue.includes("${")) {
-            // Extract environment variable name from ${ENV_VAR} pattern
-            const envVarMatch = headerValue.match(/\${([^}]+)}/);
-            if (envVarMatch && envVarMatch[1] && process.env[envVarMatch[1]]) {
-              // Replace the placeholder with the actual environment variable value
-              serverConfig.headers![key] = headerValue.replace(
-                `\${${envVarMatch[1]}}`,
-                process.env[envVarMatch[1]]!
-              );
-            }
-          }
-        });
-      }
-
-      if (serverConfig.transport === "sse" && serverConfig.url) {
-        const sseConfig: SSEConnection = {
-          transport: "sse",
-          url: serverConfig.url,
-          headers: serverConfig.headers,
-          useNodeEventSource: serverConfig.useNodeEventSource,
-        };
-        enabledServerConfig[serverName] = sseConfig;
-      } else if (serverConfig.command && serverConfig.args) {
-        const stdioConfig: StdioConnection = {
-          transport: "stdio",
-          command: serverConfig.command,
-          args: serverConfig.args,
-          env: serverConfig.env,
-        };
-        enabledServerConfig[serverName] = stdioConfig;
-      } else {
-        console.warn(
-          `Server "${serverName}" has invalid configuration. Skipping.`
-        );
-      }
+  for (const serverName of enabledServers) {
+    const serverConfig = MCP_SERVERS_CONFIG[serverName];
+    if (!serverConfig) {
+      console.warn(
+        `Server "${serverName}" not found in configuration. Skipping.`
+      );
+      continue;
     }
-  });
 
-  return enabledServerConfig;
+    const processedConfig: any = { ...serverConfig };
+
+    // Process environment variables and OAuth tokens in headers
+    if (processedConfig.headers) {
+      const processedHeaders: Record<string, string> = {};
+      for (const [key, value] of Object.entries(processedConfig.headers)) {
+        let processedValue = value as string;
+
+        // Handle OAuth token placeholders
+        if (typeof value === 'string' && value.startsWith("OAUTH:") && userId) {
+          const provider = value.replace("OAUTH:", "");
+          const token = await getMCPToken(userId, provider);
+          if (token) {
+            processedValue = `Bearer ${token}`; // It's good practice to include "Bearer"
+          } else {
+            console.warn(`OAuth token for provider "${provider}" not found.`);
+          }
+        }
+        processedHeaders[key] = processedValue;
+      }
+      processedConfig.headers = processedHeaders;
+    }
+    mcpServers[serverName] = processedConfig as Connection;
+  }
+
+  // Construct the final ClientConfig object
+  const clientConfig: ClientConfig = {
+    mcpServers,
+    useStandardContentBlocks: true,
+    throwOnLoadError: false, // It's often better to not throw on load error in production
+  };
+
+  return clientConfig;
 }
 
-// Initialize MCP client with enabled servers
-async function initializeMCPClient(enabledServers: string[]) {
-  const mcpConfig = getEnabledMCPServers(enabledServers);
-  const mcpClient = new MultiServerMCPClient(mcpConfig);
-  await mcpClient.initializeConnections();
-  return mcpClient.getTools();
+/**
+ * Initializes the MCP client and fetches tools for the enabled servers.
+ */
+async function initializeMCPClient(
+  enabledServers: string[],
+  userId?: string
+): Promise<StructuredToolInterface[]> {
+  // 1. Get the correctly formatted config object.
+  const mcpConfig = await getMcpClientConfig(enabledServers, userId);
+
+  if (Object.keys(mcpConfig.mcpServers).length === 0) {
+    console.log("No enabled MCP servers, returning empty tools list.");
+    return [];
+  }
+
+  console.log(
+    "Initializing MCP client with servers:",
+    Object.keys(mcpConfig.mcpServers)
+  );
+
+  try {
+    // 2. Pass the config object DIRECTLY to the constructor.
+    const mcpClient = new MultiServerMCPClient(mcpConfig);
+
+    // 3. getTools() will implicitly initialize the connections.
+    const tools = await mcpClient.getTools();
+    
+    // Optional: You might want to hold onto the client instance to close it later
+    // For example, by attaching it to the graph's state or a global manager.
+    // await mcpClient.close();
+    
+    return tools;
+  } catch (error) {
+    console.error("Failed to initialize MCP Client or get tools:", error);
+    // Return empty array or re-throw, depending on desired behavior
+    return [];
+  }
 }
 
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant that can use tools to find information`;
@@ -334,9 +373,9 @@ function shouldContinue({ messages }: typeof MessagesAnnotation.State) {
 // Define the function that calls the model
 async function callModel(
   state: typeof MessagesAnnotation.State,
-  config: LangGraphRunnableConfig
+  config: RunnableConfig
 ) {
-  const store = config.store;
+  const store = (config as any).store;
   if (!store) {
     throw new Error("store is required when compiling the graph");
   }
@@ -382,10 +421,10 @@ async function callModel(
   const enhancedSystemPrompt = `${systemPrompt}${memoryContext}`;
 
   const enabledServers = agentConfig.enabled_mcp_servers || [];
-  const cacheKey = enabledServers.slice().sort().join(",");
+  const cacheKey = `${enabledServers.slice().sort().join(",")}-${userId}`;
   let tools = toolCache.get(cacheKey);
   if (!tools) {
-    tools = await initializeMCPClient(enabledServers);
+    tools = await initializeMCPClient(enabledServers, userId);
     toolCache.set(cacheKey, tools);
   }
 
@@ -428,4 +467,3 @@ const workflow = new StateGraph(MessagesAnnotation)
 
 // Export the compiled graph for platform deployment
 export const graph = workflow.compile();
-
