@@ -1,4 +1,5 @@
 import { Search, Brain, Database, Mail, File, Calendar } from "lucide-react";
+import { SiCanva } from "react-icons/si";
 
 export const AVAILABLE_MCP_SERVERS = {
   tavily: {
@@ -14,20 +15,18 @@ export const AVAILABLE_MCP_SERVERS = {
     icon: Brain,
     requiredCredentials: [],
   },
-  notionApi: {
-    name: "Notion API",
-    description: "Notion API",
-    icon: Database,
-    requiredCredentials: ["notion_integration_secret"],
-  },
-  "gmail-mcp-server": {
-    name: "Gmail",
-    description: "Gmail email management and operations",
-    icon: Mail,
-    requiredCredentials: [],
-    requiresOAuth: true,
-    oauthProvider: "google",
+  firecrawl: {
+    name: "Firecrawl",
+    description: "Firecrawl API",
+    icon: Search,
+    requiredCredentials: ["firecrawl_api_key"],
   },
   
+  "canva-dev": {
+    name: "Canva",
+    description: "Canva API",
+    icon: SiCanva,
+    requiredCredentials: [],
+  },
   
 };

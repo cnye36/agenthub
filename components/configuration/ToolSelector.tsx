@@ -277,7 +277,7 @@ export function ToolSelector({
                 <Switch
                   checked={enabledMCPServers.includes(id)}
                   onCheckedChange={() => handleToggleTool(id)}
-                  disabled={id === "tavily"} // Tavily is always enabled
+                  
                 />
               </div>
             </div>

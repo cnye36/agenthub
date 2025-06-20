@@ -1,7 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { generateAgentAvatar } from "@/lib/avatar-generation";
-import { AVAILABLE_MCP_SERVERS } from "@/lib/mcpToolIndex";
+import { getAvailableMCPServersInfo, MCP_SERVERS_CONFIG } from "@/lib/agent/reactAgent";
 import type { AgentConfiguration, ModelType } from "@/types/agent";
 
 // Store previously generated names per user with a maximum cache size
@@ -97,11 +97,11 @@ User's Description: {description}
 Agent Type: {agentType}
 
 Available Tools:
-${Object.values(AVAILABLE_MCP_SERVERS)
-  .map((t) => `- ${t.name}: ${t.description}`)
+${Object.entries(getAvailableMCPServersInfo())
+  .map(([name, description]) => `- ${name}: ${description}`)
   .join("\n")}
 
-Note: Only include Search (Tavily) by default.
+
 
 Provide the following information in a clear format:
 
@@ -128,8 +128,9 @@ Provide the following information in a clear format:
    - [Any specific language patterns to use or avoid]
    
    ## Ability
-   - [What capabilities the agent has]
-   - [When to use specific tools at its disposal]
+   - [What capabilities the agent has - describe capabilities generically, not specific tool names]
+   - [When to use tools for tasks like email, web search, knowledge management, etc.]
+   - [Note: Available tools will be dynamically provided at runtime based on configuration]
    
    ## Guardrails
    - [Privacy considerations]
@@ -141,10 +142,10 @@ Provide the following information in a clear format:
    - [Handling edge cases]
    - [Closing interactions]
 
-4. TOOLS: List required tools from: ${Object.keys(AVAILABLE_MCP_SERVERS).join(
+4. TOOLS: List required tools from: ${Object.keys(getAvailableMCPServersInfo()).join(
   ", "
 )}
-5. MODEL: Specify gpt-4o
+5. MODEL: Specify gpt-4.1
 6. TEMPERATURE: Provide a number between 0 and 1
 7. MEMORY_WINDOW: Suggest number of past messages to consider (default: 10)
 8. MEMORY_RELEVANCE: Suggest relevance threshold between 0-1 for memory retrieval (default: 0.7)
@@ -286,16 +287,13 @@ export async function generateAgentConfiguration(
       case "TOOLS":
         // Parse requested MCP servers
         const requestedServers = value.split(",").map((t) => t.trim());
-        config.config.enabled_mcp_servers = [
-          "memory",
-          ...requestedServers.filter(
-            (server) =>
-              Object.prototype.hasOwnProperty.call(
-                AVAILABLE_MCP_SERVERS,
-                server
-              ) && server !== "memory"
-          ),
-        ];
+        config.config.enabled_mcp_servers = requestedServers.filter(
+          (server) =>
+            Object.prototype.hasOwnProperty.call(
+              MCP_SERVERS_CONFIG,
+              server
+            ) || server === "memory"
+        );
         break;
       case "MODEL":
         config.config.model = value as ModelType;

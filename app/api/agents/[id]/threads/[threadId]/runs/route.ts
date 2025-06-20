@@ -117,6 +117,10 @@ export async function POST(
       );
     }
 
+    console.log("=== Agent Config Debug ===");
+    console.log("Agent from DB:", JSON.stringify(agent, null, 2));
+    console.log("Agent config:", JSON.stringify(agent.config, null, 2));
+
     const { content } = await request.json();
     if (typeof content !== "string") {
       return NextResponse.json(
@@ -136,14 +140,19 @@ export async function POST(
         // Use "reactAgent" as the fixed graph_id for all agents
         const graphId = "reactAgent";
 
+        const configurable = {
+          ...(agent.config || {}),
+          agentId: id,
+        };
+        
+        console.log("=== Config to be sent to graph ===");
+        console.log("configurable:", JSON.stringify(configurable, null, 2));
+
         const eventStream = client.runs.stream(threadId, graphId, {
           input: { messages: [{ role: "user", content }] },
           config: {
             tags: ["chat"],
-            configurable: {
-              ...(agent.config || {}),
-              agentId: id,
-            },
+            configurable,
             recursion_limit: 100,
           },
           streamMode: ["messages"],

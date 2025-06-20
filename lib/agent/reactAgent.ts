@@ -19,6 +19,9 @@ import { retrieveRelevantDocuments } from "@/lib/retrieval";
 import { createClient } from "@/supabase/client";
 import { v4 as uuidv4 } from "uuid";
 import { getMCPToken } from "@/lib/agent/oauth";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 // Initialize the memory store
 export const store = new InMemoryStore();
@@ -227,16 +230,7 @@ interface MCPServerConfig {
 }
 
 // Define MCP servers inline configuration
-const MCP_SERVERS_CONFIG: Record<string, any> = {
-  "gmail-mcp-server": {
-    transport: "http",
-    url: "http://146.190.159.62:8080/mcp",
-    headers: {
-      "x-google-access-token": "OAUTH:google",
-    },
-    authProvider: "google",
-    automaticSSEFallback: true,
-  },
+export const MCP_SERVERS_CONFIG: Record<string, any> = {
   firecrawl: {
     transport: "stdio",
     command: "npx",
@@ -245,11 +239,30 @@ const MCP_SERVERS_CONFIG: Record<string, any> = {
       FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY || "",
     },
   },
-  math: {
+  "sequential-thinking": {
     transport: "stdio",
     command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-math"],
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
   },
+  tavily: {
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "tavily-mcp@0.1.3"],
+    env: {
+      TAVILY_API_KEY: process.env.TAVILY_API_KEY || "",
+    },
+  },
+  "canva-dev": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@canva/cli@latest",
+        "mcp"
+      ]
+  },
+  
+  
+  
 };
 
 /**
@@ -259,22 +272,31 @@ const MCP_SERVERS_CONFIG: Record<string, any> = {
 async function getMcpClientConfig(
   enabledServers: string[],
   userId?: string
-): Promise<ClientConfig> {
+): Promise<Record<string, Connection>> {
+  console.log("=== getMcpClientConfig Debug ===");
+  console.log("Input enabled servers:", enabledServers);
+  console.log("Available server configs:", Object.keys(MCP_SERVERS_CONFIG));
+  
   const mcpServers: Record<string, Connection> = {};
 
   for (const serverName of enabledServers) {
+    console.log(`Processing server: ${serverName}`);
+    
     const serverConfig = MCP_SERVERS_CONFIG[serverName];
     if (!serverConfig) {
       console.warn(
-        `Server "${serverName}" not found in configuration. Skipping.`
+        `❌ Server "${serverName}" not found in configuration. Skipping.`
       );
       continue;
     }
+
+    console.log(`✅ Found config for ${serverName}:`, serverConfig);
 
     const processedConfig: any = { ...serverConfig };
 
     // Process environment variables and OAuth tokens in headers
     if (processedConfig.headers) {
+      console.log(`Processing headers for ${serverName}:`, processedConfig.headers);
       const processedHeaders: Record<string, string> = {};
       for (const [key, value] of Object.entries(processedConfig.headers)) {
         let processedValue = value as string;
@@ -282,28 +304,42 @@ async function getMcpClientConfig(
         // Handle OAuth token placeholders
         if (typeof value === 'string' && value.startsWith("OAUTH:") && userId) {
           const provider = value.replace("OAUTH:", "");
+          console.log(`Fetching OAuth token for provider: ${provider}`);
           const token = await getMCPToken(userId, provider);
           if (token) {
             processedValue = `Bearer ${token}`; // It's good practice to include "Bearer"
+            console.log(`✅ OAuth token found for ${provider}`);
           } else {
-            console.warn(`OAuth token for provider "${provider}" not found.`);
+            console.warn(`❌ OAuth token for provider "${provider}" not found.`);
           }
         }
         processedHeaders[key] = processedValue;
       }
       processedConfig.headers = processedHeaders;
+      console.log(`Processed headers for ${serverName}:`, processedHeaders);
     }
+    
+    // Process environment variables
+    if (processedConfig.env) {
+      console.log(`Processing env vars for ${serverName}:`, processedConfig.env);
+      const processedEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(processedConfig.env)) {
+        processedEnv[key] = value as string;
+      }
+      processedConfig.env = processedEnv;
+    }
+    
     mcpServers[serverName] = processedConfig as Connection;
+    console.log(`✅ Added server ${serverName} to config`);
   }
 
-  // Construct the final ClientConfig object
-  const clientConfig: ClientConfig = {
-    mcpServers,
-    useStandardContentBlocks: true,
-    throwOnLoadError: false, // It's often better to not throw on load error in production
-  };
+  // NOTE: MultiServerMCPClient constructor expects servers directly, not wrapped in mcpServers
+  // We'll pass the servers object directly to the constructor instead of using ClientConfig
+  
+  console.log("Final mcpServers count:", Object.keys(mcpServers).length);
+  console.log("Final mcpServers:", Object.keys(mcpServers));
 
-  return clientConfig;
+  return mcpServers;
 }
 
 /**
@@ -313,25 +349,47 @@ async function initializeMCPClient(
   enabledServers: string[],
   userId?: string
 ): Promise<StructuredToolInterface[]> {
-  // 1. Get the correctly formatted config object.
-  const mcpConfig = await getMcpClientConfig(enabledServers, userId);
+  console.log("=== initializeMCPClient Debug ===");
+  console.log("Enabled servers:", enabledServers);
+  console.log("User ID:", userId);
 
-  if (Object.keys(mcpConfig.mcpServers).length === 0) {
+  // 1. Get the correctly formatted config object.
+  const mcpServers = await getMcpClientConfig(enabledServers, userId);
+
+  if (Object.keys(mcpServers).length === 0) {
     console.log("No enabled MCP servers, returning empty tools list.");
     return [];
   }
 
   console.log(
     "Initializing MCP client with servers:",
-    Object.keys(mcpConfig.mcpServers)
+    Object.keys(mcpServers)
   );
+  console.log("MCP Servers Config:", JSON.stringify(mcpServers, null, 2));
 
   try {
-    // 2. Pass the config object DIRECTLY to the constructor.
-    const mcpClient = new MultiServerMCPClient(mcpConfig);
+    // 2. Pass the servers object DIRECTLY to the constructor.
+    const mcpClient = new MultiServerMCPClient(mcpServers);
+    console.log("✅ MCP Client created successfully");
 
-    // 3. getTools() will implicitly initialize the connections.
+    // 3. Initialize connections first to ensure servers are ready
+    console.log("Initializing connections...");
+    const serverTools = await mcpClient.initializeConnections();
+    console.log("Connection results:", Object.keys(serverTools));
+
+    // 4. Get the tools from the MCP client.
+    console.log("Fetching tools from MCP client...");
     const tools = await mcpClient.getTools();
+    console.log("✅ Tools fetched successfully:", tools.length, "tools");
+    
+    // Log each tool for debugging
+    tools.forEach((tool, index) => {
+      console.log(`Tool ${index + 1}:`, {
+        name: tool.name,
+        description: tool.description,
+        schema: tool.schema
+      });
+    });
     
     // Optional: You might want to hold onto the client instance to close it later
     // For example, by attaching it to the graph's state or a global manager.
@@ -339,7 +397,12 @@ async function initializeMCPClient(
     
     return tools;
   } catch (error) {
-    console.error("Failed to initialize MCP Client or get tools:", error);
+    console.error("❌ Failed to initialize MCP Client or get tools:", error);
+    if (error instanceof Error) {
+      console.error("Error name:", error.name);
+      console.error("Error message:", error.message);
+      console.error("Error stack:", error.stack);
+    }
     // Return empty array or re-throw, depending on desired behavior
     return [];
   }
@@ -353,20 +416,33 @@ const toolCache = new Map<string, StructuredToolInterface[]>();
 // Initialize an empty tool node; tools will be populated per run
 const toolNode = new ToolNode([]);
 
-// Base model instance; tools will be bound dynamically
-const baseModel = new ChatOpenAI({
-  model: "gpt-4.1",
-  temperature: 0.5,
-});
+// Base model factory function; tools will be bound dynamically
+function createBaseModel() {
+  return new ChatOpenAI({
+    model: "gpt-4.1",
+    temperature: 0.5,
+  });
+}
 
 // Define the function that determines whether to continue or not
 function shouldContinue({ messages }: typeof MessagesAnnotation.State) {
   const lastMessage = messages[messages.length - 1] as AIMessage;
 
+  console.log("=== shouldContinue Debug ===");
+  console.log("Last message type:", lastMessage.constructor.name);
+  console.log("Has tool_calls?", !!(lastMessage.tool_calls?.length));
+  console.log("Tool calls count:", lastMessage.tool_calls?.length || 0);
+  
+  if (lastMessage.tool_calls?.length) {
+    console.log("Tool calls details:", lastMessage.tool_calls);
+  }
+
   // If the LLM makes a tool call, then we route to the "tools" node
   if (lastMessage.tool_calls?.length) {
+    console.log("🔧 Routing to tools node");
     return "tools";
   }
+  console.log("🛑 Ending conversation");
   return "__end__";
 }
 
@@ -382,10 +458,16 @@ async function callModel(
   if (!config.configurable?.agentId) {
     throw new Error("agentId is required in the config");
   }
+  
+  console.log("=== Full config.configurable Debug ===");
+  console.log("config.configurable:", JSON.stringify(config.configurable, null, 2));
+  
   const agentConfig = config.configurable as AgentConfiguration;
   const userId = (config.configurable as { agentId?: string })?.agentId;
   const systemPrompt = agentConfig.prompt_template || DEFAULT_SYSTEM_PROMPT;
   const memoryEnabled = agentConfig.memory?.enabled ?? true; // Default to enabled if not specified
+
+  console.log("Agent config enabled servers:", agentConfig.enabled_mcp_servers);
 
   // Retrieve user memories
   const memories = await retrieveMemories(userId, memoryEnabled);
@@ -417,24 +499,62 @@ async function callModel(
     }
   }
 
-  // Combine system prompt with memory context
-  const enhancedSystemPrompt = `${systemPrompt}${memoryContext}`;
+  // Get dynamic tool information for the current enabled servers
+  const availableToolsInfo = getAvailableMCPServersInfo();
+  const enabledToolsList = (agentConfig.enabled_mcp_servers || [])
+    .map(server => `- ${server}: ${availableToolsInfo[server] || "Tool available"}`)
+    .join("\n");
+  
+  const toolsContext = enabledToolsList ? `\n\n## Available Tools\nYou have access to the following tools:\n${enabledToolsList}\n\nUse these tools when appropriate to help answer user questions. Always consider if a tool can provide more accurate or up-to-date information than your training data.` : "";
 
-  const enabledServers = agentConfig.enabled_mcp_servers || [];
+  // Combine system prompt with memory context and tools context
+  const enhancedSystemPrompt = `${systemPrompt}${memoryContext}${toolsContext}`;
+
+  // Filter out "memory" as it's handled by the in-memory store, not MCP
+  const enabledServers = (agentConfig.enabled_mcp_servers || []).filter(
+    server => server !== "memory"
+  );
+  console.log("Filtered enabled servers (excluding memory):", enabledServers);
+  
   const cacheKey = `${enabledServers.slice().sort().join(",")}-${userId}`;
   let tools = toolCache.get(cacheKey);
   if (!tools) {
+    console.log("Tools not in cache, initializing MCP client...");
     tools = await initializeMCPClient(enabledServers, userId);
     toolCache.set(cacheKey, tools);
+  } else {
+    console.log("Using cached tools");
   }
 
+  console.log("=== Tools being bound to model ===");
+  console.log("Number of tools:", tools.length);
+  tools.forEach((tool, index) => {
+    console.log(`Tool ${index + 1}:`, {
+      name: tool.name,
+      description: tool.description
+    });
+  });
+
   toolNode.tools = tools;
+  const baseModel = createBaseModel();
   const modelWithTools = baseModel.bindTools(tools);
+
+  console.log("=== Enhanced System Prompt ===");
+  console.log(enhancedSystemPrompt);
+  console.log("=== End Prompt ===");
 
   const response = await modelWithTools.invoke([
     new SystemMessage(enhancedSystemPrompt),
     ...state.messages,
   ]);
+
+  console.log("=== Model Response Debug ===");
+  console.log("Response type:", typeof response);
+  console.log("Has tool_calls?", !!(response as AIMessage).tool_calls?.length);
+  if ((response as AIMessage).tool_calls?.length) {
+    console.log("Tool calls:", (response as AIMessage).tool_calls);
+  }
+  console.log("Response content preview:", (response.content as string).substring(0, 200));
 
   return { messages: [response] };
 }
@@ -467,3 +587,46 @@ const workflow = new StateGraph(MessagesAnnotation)
 
 // Export the compiled graph for platform deployment
 export const graph = workflow.compile();
+
+// Get available MCP servers description for prompt generation
+export function getAvailableMCPServersInfo(): Record<string, string> {
+  return {
+    "gmail-mcp-server": "Access and manage Gmail messages, send emails, search and organize your inbox",
+    "firecrawl": "Web scraping and content extraction from websites, crawl and extract structured data",
+    "memory": "Knowledge graph management for creating entities, relations, and observations",
+    "tavily": "Web search and real-time information retrieval from the internet"
+  };
+}
+
+// Get tools info for specific enabled servers
+export async function getToolsInfoForServers(enabledServers: string[], userId?: string): Promise<string[]> {
+  const tools = await initializeMCPClient(enabledServers.filter(s => s !== "memory"), userId);
+  const toolDescriptions = tools.map(tool => `- ${tool.name}: ${tool.description}`);
+  
+  // Add memory tool if enabled
+  if (enabledServers.includes("memory")) {
+    toolDescriptions.push("- memory: Store and retrieve user profile information and conversation context");
+  }
+  
+  return toolDescriptions;
+}
+
+// Simple test function for debugging MCP configuration
+export async function testMCPConfiguration(enabledServers: string[], userId?: string) {
+  console.log("=== Testing MCP Configuration ===");
+  console.log("Testing servers:", enabledServers);
+  console.log("User ID:", userId);
+  
+  try {
+    const tools = await initializeMCPClient(enabledServers, userId);
+    console.log("✅ Successfully loaded", tools.length, "tools");
+    tools.forEach((tool, index) => {
+      console.log(`  ${index + 1}. ${tool.name}: ${tool.description}`);
+    });
+    return tools;
+  } catch (error) {
+    console.error("❌ Failed to load MCP tools:", error);
+    return [];
+  }
+}
+

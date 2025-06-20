@@ -34,6 +34,8 @@ export const AgentConfigurableOptionsSchema = z.object({
   knowledge_base: KnowledgeBaseOptionsSchema.optional(),
   prompt_template: z.string(),
   agent_avatar: z.string(),
+  enabled_mcp_servers: z.array(z.string()),
+  agentId: z.string().optional(),
 });
 
 // Complete config schema
